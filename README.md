@@ -1,5 +1,7 @@
 # WordPress Core Version Audit + Upstream Remediation (Pantheon / Terminus)
 
+[![Unofficial Support](https://img.shields.io/badge/Pantheon-Unofficial_Support-yellow?logo=pantheon&color=FFDC28)](https://docs.pantheon.io/oss-support-levels#unofficial-support)
+
 Two self-contained Bash scripts for auditing WordPress core versions across your
 Pantheon sites and remediating them via upstream updates:
 
@@ -27,7 +29,7 @@ Default affected ranges: `6.9.0–6.9.4` and `7.0.0–7.0.1` (inclusive).
 
 ```bash
 ./audit-wp-core-versions.sh                        # default ranges, dev, sites you own
-./audit-wp-core-versions.sh -s org --org "My Org"  # scan an organization's sites
+./audit-wp-core-versions.sh --org "My Org"         # scan an organization's sites
 ./audit-wp-core-versions.sh -s all -e live         # everything you can access, live env
 ./audit-wp-core-versions.sh -r 6.5.0-6.5.9         # custom ranges
 ```
@@ -39,7 +41,7 @@ Default affected ranges: `6.9.0–6.9.4` and `7.0.0–7.0.1` (inclusive).
 | `-r, --ranges <spec>` | `AUDIT_RANGES` | `6.9.0-6.9.4,7.0.0-7.0.1` | Comma-separated **inclusive** ranges (`low-high`) |
 | `-e, --env <env>` | `AUDIT_ENV` | `dev` | Environment to read the version from |
 | `-s, --scope <scope>` | `AUDIT_SCOPE` | `me` | `me` \| `team` \| `org` \| `all` (see below) |
-| `--org <id>` | `AUDIT_ORG` | `all` | Org name/label/UUID for `--scope org` |
+| `--org <id>` | `AUDIT_ORG` | `all` | Org name/label/UUID. **Implies `--scope org`** — no need to also pass `-s org` |
 | `-d, --output <dir>` | `AUDIT_OUTPUT` | `./reports` | Parent directory for the run's report folder |
 | `--include-frozen` | `AUDIT_INCLUDE_FROZEN` | off | Also scan frozen sites (skipped by default) |
 | `-h, --help` | — | — | Show usage |
@@ -52,7 +54,7 @@ Default affected ranges: `6.9.0–6.9.4` and `7.0.0–7.0.1` (inclusive).
 |---|---|---|
 | `me` (default) | `--owner=me` | Only sites you personally own |
 | `team` | `--team` | Sites you're a team member of |
-| `org` | `--org=<id>` | Sites in your organization(s) — set `--org` to target one |
+| `org` | `--org=<id>` | Sites in your organization(s) — pass `--org "Name"` to target one (that alone selects org scope); `-s org` alone = all your orgs |
 | `all` | *(none)* | Every site accessible to you |
 
 > Note: `me` **excludes** sites owned by an organization or a teammate. If your
@@ -100,15 +102,16 @@ The updatable-type allowlist is configurable with `--updatable-types`.
 
 ### Safety
 
-**Dry-run by default** — it classifies and reports, making **no changes**. You
-must pass `--execute` to actually apply, and in execute mode it refuses to run
-non-interactively without `-y`.
+**Applies by default.** On an interactive terminal it prompts once for
+confirmation before applying (skip with `-y`); with no terminal (cron/CI) it
+proceeds without prompting. Use **`--dry-run` (`-n`)** to classify and report
+with **no changes**.
 
 ```bash
-./apply-upstream-updates.sh                        # dry-run against newest audit report
+./apply-upstream-updates.sh                        # apply, against newest audit report (prompts)
+./apply-upstream-updates.sh --dry-run              # preview only, no changes
 ./apply-upstream-updates.sh -i reports/wp-core-audit-20260721-124620
-./apply-upstream-updates.sh --execute              # apply (prompts for confirmation)
-./apply-upstream-updates.sh --execute -y --updatedb --accept-upstream
+./apply-upstream-updates.sh -y --updatedb --accept-upstream   # apply, no prompt
 ```
 
 ### Options
@@ -118,7 +121,7 @@ non-interactively without `-y`.
 | `-i, --input <path>` | `APPLY_INPUT` | newest audit report | `matches.csv` or a report directory |
 | `-d, --output <dir>` | `APPLY_OUTPUT` | `./reports` | Parent dir for this run's report |
 | `--updatable-types <t>` | `APPLY_UPDATABLE_TYPES` | `core` | Upstream types to auto-apply |
-| `--execute` | `APPLY_EXECUTE` | off (dry-run) | Actually apply updates |
+| `-n, --dry-run` | `APPLY_DRY_RUN` | off (applies) | Classify + report only; make no changes |
 | `--updatedb` | — | off | Pass `--updatedb` (Drupal only; harmless for WP) |
 | `--accept-upstream` | — | off | Auto-resolve conflicts in favor of upstream |
 | `--no-verify` | — | verify on | Skip the post-apply WP-version re-check |
@@ -154,15 +157,15 @@ Handy for CI/cron: a non-zero exit means "something needs attention."
 
 ```bash
 # 1. Find affected sites (org scope, since sites live under an org)
-./audit-wp-core-versions.sh -s org --org "My Org"
+./audit-wp-core-versions.sh --org "My Org"
 
-# 2. See what can be auto-remediated vs. what needs manual work (no changes yet)
+# 2. Preview what would be auto-remediated vs. what needs manual work
+./apply-upstream-updates.sh --dry-run
+
+# 3. Apply to the core-upstream sites (prompts for confirmation)
 ./apply-upstream-updates.sh
-
-# 3. Apply to the core-upstream sites
-./apply-upstream-updates.sh --execute
 
 # 4. Manually update the custom / external-VCS upstreams the report listed,
 #    then re-audit to confirm.
-./audit-wp-core-versions.sh -s org --org "My Org"
+./audit-wp-core-versions.sh --org "My Org"
 ```
