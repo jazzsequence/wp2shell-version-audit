@@ -104,6 +104,14 @@ Everything else is **excluded and reported** with specific guidance:
 Classification uses `type` **plus repo ownership**, so it generalizes across the
 whole upstream catalog (no hardcoded upstream list).
 
+**SFTP handling & logs:** `upstream:updates:apply` requires Git connection mode.
+If an environment is in SFTP mode, the script automatically flips it to Git for
+the apply and restores SFTP afterward (leaving the site as it found it). The full
+Terminus output for every site is captured to `<report>/logs/<site>.<env>.log`,
+and each failure/no-change surfaces the real Terminus error (e.g. merge conflicts,
+build failures) in the progress output, `applied.csv`, and `summary.txt` — not a
+bare "exit 1".
+
 ### Safety
 
 **Applies by default.** On an interactive terminal it prompts once for

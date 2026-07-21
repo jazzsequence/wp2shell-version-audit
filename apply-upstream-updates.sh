@@ -23,6 +23,10 @@
 # (skip with -y). With no terminal (cron/CI) it proceeds without prompting, so
 # pass --dry-run in automation when you only want a report.
 #
+# SFTP: upstream:updates:apply requires Git mode. If an environment is in SFTP
+# mode, it is automatically flipped to Git for the apply and restored to SFTP
+# afterward. Full per-site Terminus output is written to <report>/logs/.
+#
 # Requirements: bash (3.2+), terminus (>= 3.x), an authenticated session.
 #
 # Usage:
@@ -171,6 +175,8 @@ APPLIED_CSV="${OUTDIR}/applied.csv"
 EXCLUDED_TSV="${OUTDIR}/.excluded.tsv"           # working file, grouped later
 EXCLUDED_CSV="${OUTDIR}/excluded-upstreams.csv"
 SUMMARY="${OUTDIR}/summary.txt"
+LOGDIR="${OUTDIR}/logs"          # per-site raw Terminus output (apply phase)
+mkdir -p "$LOGDIR"
 : > "$EXCLUDED_TSV"
 printf 'site,environment,wp_core_version,upstream_type,upstream_label,upstream_id,site_org,decision\n' > "$CLASS_CSV"
 printf 'site,environment,upstream_label,old_version,new_version,apply_status,note\n' > "$APPLIED_CSV"
@@ -299,34 +305,72 @@ if [ "$EXECUTE" = "1" ] && [ "$APPLY_N" -gt 0 ]; then
 
   info ""
   info "Applying to ${APPLY_N} site(s), up to ${JOBS} in parallel ..."
+  info "Per-site Terminus output: ${LOGDIR}/"
   AP_WORK="$(mktemp -d)"
   trap 'rm -rf "$AP_WORK"' EXIT
 
+  # Turn raw Terminus output into a one-line, comma/newline-free reason. Prefers
+  # the [error]/[warning] message (stripped of timestamp+level).
+  extract_reason() {
+    local r
+    r="$(printf '%s' "$1" | tr -d '\r' | grep -iE '\[(error|warning)\]' | sed -E 's/.*\[(error|warning)\][[:space:]]*//' | tail -n1)"
+    [ -z "$r" ] && r="$(printf '%s' "$1" | tr -d '\r' | grep -v '^[[:space:]]*$' | tail -n1)"
+    printf '%s' "$r" | tr '\n\r\t,' '    ' | sed 's/  */ /g'
+  }
+
   apply_worker() {
-    local idx="$1" site="$2" env="$3" old="$4" label="$5" rc new status note
-    set +e
-    terminus upstream:updates:apply "${site}.${env}" \
+    set +e   # a failed apply is data, not a reason to abort the worker
+    local idx="$1" site="$2" env="$3" old="$4" label="$5"
+    local rc new status note out reason logf mode restore_sftp=0
+    logf="${LOGDIR}/${site}.${env}.log"
+
+    # upstream:updates:apply requires Git mode. If the env is in SFTP mode, flip
+    # it to Git for the apply, then restore SFTP afterward so the site is left
+    # exactly as we found it.
+    mode="$(terminus env:info "${site}.${env}" --field=connection_mode </dev/null 2>/dev/null | tr -d '[:space:]')"
+    if [ "$mode" = "sftp" ]; then
+      printf '[connection] %s.%s sftp -> git\n' "$site" "$env" >> "$logf"
+      if terminus connection:set "${site}.${env}" git -y </dev/null >>"$logf" 2>&1; then
+        restore_sftp=1
+      fi
+    fi
+
+    out="$(terminus upstream:updates:apply "${site}.${env}" \
       $( [ "$DO_UPDATEDB" = 1 ] && printf -- '--updatedb' ) \
       $( [ "$DO_ACCEPT" = 1 ] && printf -- '--accept-upstream' ) \
-      -y </dev/null >/dev/null 2>&1
+      -y </dev/null 2>&1)"
     rc=$?
-    set -e
+    printf '%s\n' "$out" >> "$logf"
+
     new="$old"; status="applied"; note=""
     if [ "$rc" -ne 0 ]; then
-      status="apply-failed"; note="terminus exit $rc"
-      printf '  [FAIL]     %s.%s (exit %s)\n' "$site" "$env" "$rc" >&2
+      status="apply-failed"
+      reason="$(extract_reason "$out")"
+      note="exit ${rc}: ${reason}"
+      printf '  [FAIL]     %s.%s: %s\n' "$site" "$env" "$reason" >&2
     else
       if [ "$DO_VERIFY" = "1" ]; then
-        new="$(terminus remote:wp "${site}.${env}" -- core version </dev/null 2>/dev/null | tr -d '\r' | tail -n1 || true)"
+        new="$(terminus remote:wp "${site}.${env}" -- core version </dev/null 2>/dev/null | tr -d '\r' | tail -n1)"
         new="${new:-$old}"
       fi
       if [ "$DO_VERIFY" = "1" ] && [ "$new" = "$old" ]; then
-        status="no-change"; note="version still ${new}; upstream may not track core"
-        printf '  [NOCHANGE] %s.%s (still %s)\n' "$site" "$env" "$new" >&2
+        status="no-change"
+        reason="$(extract_reason "$out")"
+        note="applied; version still ${new} (${reason:-see log})"
+        printf '  [NOCHANGE] %s.%s still %s: %s\n' "$site" "$env" "$new" "${reason:-see log}" >&2
       else
+        note="updated ${old} -> ${new}"
         printf '  [ok]       %s.%s (%s -> %s)\n' "$site" "$env" "$old" "$new" >&2
       fi
     fi
+
+    # Restore SFTP mode if we flipped it.
+    if [ "$restore_sftp" = "1" ]; then
+      printf '[connection] %s.%s git -> sftp (restore)\n' "$site" "$env" >> "$logf"
+      terminus connection:set "${site}.${env}" sftp -y </dev/null >>"$logf" 2>&1
+    fi
+
+    note="$(printf '%s' "$note" | tr '\n\r,' '   ' | sed 's/  */ /g')"
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$site" "$env" "$label" "$old" "$new" "$status" "$note" > "${AP_WORK}/${idx}"
   }
 
