@@ -415,7 +415,7 @@ rule() { printf '  %s\n' '------------------------------------------------------
         printf "\n    * %s  [type: %s]\n", label, type
         printf "        why:   %s\n", why(type)
         printf "        fix:   %s\n", fix(type)
-        if (repo!="") printf "        repo:  %s\n", repo
+        if (type=="custom" && repo!="") printf "        repo:  %s\n", repo
         printf "        sites:%s\n", sites
       }
       { if (!started || $1!=key) { if (started) flush(); key=$1; type=$2; label=$3; repo=$4; sites=""; started=1 }
