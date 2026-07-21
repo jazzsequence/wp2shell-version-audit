@@ -44,7 +44,11 @@ Default affected ranges: `6.9.0–6.9.4` and `7.0.0–7.0.1` (inclusive).
 | `--org <id>` | `AUDIT_ORG` | `all` | Org name/label/UUID. **Implies `--scope org`** — no need to also pass `-s org` |
 | `-d, --output <dir>` | `AUDIT_OUTPUT` | `./reports` | Parent directory for the run's report folder |
 | `--include-frozen` | `AUDIT_INCLUDE_FROZEN` | off | Also scan frozen sites (skipped by default) |
+| `-j, --jobs <n>` | `AUDIT_JOBS` | `5` | Max parallel version checks |
 | `-h, --help` | — | — | Show usage |
+
+Per-site version checks run in parallel (default 5 at a time); site discovery
+(`site:list`) is a single call and is unaffected.
 
 ### Scope
 
@@ -126,7 +130,11 @@ with **no changes**.
 | `--accept-upstream` | — | off | Auto-resolve conflicts in favor of upstream |
 | `--no-verify` | — | verify on | Skip the post-apply WP-version re-check |
 | `-y, --yes` | `APPLY_YES` | off | Skip the confirmation prompt |
+| `-j, --jobs <n>` | `APPLY_JOBS` | `5` | Max parallel operations (classification + apply) |
 | `-h, --help` | — | — | Show usage |
+
+Both the classification pass and the apply pass run in parallel (default 5 at a
+time).
 
 ### Output
 
