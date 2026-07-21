@@ -1,0 +1,168 @@
+# WordPress Core Version Audit + Upstream Remediation (Pantheon / Terminus)
+
+Two self-contained Bash scripts for auditing WordPress core versions across your
+Pantheon sites and remediating them via upstream updates:
+
+1. **`audit-wp-core-versions.sh`** — scans your sites and reports the ones whose
+   WordPress core version falls within one or more **affected version ranges**.
+2. **`apply-upstream-updates.sh`** — takes the audit results and applies upstream
+   updates, but only to sites whose upstream can actually receive them; it
+   reports the rest (custom / external-VCS upstreams) for manual updating.
+
+Nothing personal is hardcoded. Site discovery uses Terminus scope filters, so
+anyone with an authenticated Terminus session can run these against their own
+sites, unchanged. Share freely.
+
+## Requirements
+
+- [Terminus](https://docs.pantheon.io/terminus) (3.x or 4.x) on your `PATH`
+- An authenticated session: `terminus auth:login --machine-token=<token>`
+- `bash` (3.2+) and standard coreutils — macOS and Linux both work
+
+---
+
+## 1. Auditing — `audit-wp-core-versions.sh`
+
+Default affected ranges: `6.9.0–6.9.4` and `7.0.0–7.0.1` (inclusive).
+
+```bash
+./audit-wp-core-versions.sh                        # default ranges, dev, sites you own
+./audit-wp-core-versions.sh -s org --org "My Org"  # scan an organization's sites
+./audit-wp-core-versions.sh -s all -e live         # everything you can access, live env
+./audit-wp-core-versions.sh -r 6.5.0-6.5.9         # custom ranges
+```
+
+### Options
+
+| Flag | Env var | Default | Meaning |
+|---|---|---|---|
+| `-r, --ranges <spec>` | `AUDIT_RANGES` | `6.9.0-6.9.4,7.0.0-7.0.1` | Comma-separated **inclusive** ranges (`low-high`) |
+| `-e, --env <env>` | `AUDIT_ENV` | `dev` | Environment to read the version from |
+| `-s, --scope <scope>` | `AUDIT_SCOPE` | `me` | `me` \| `team` \| `org` \| `all` (see below) |
+| `--org <id>` | `AUDIT_ORG` | `all` | Org name/label/UUID for `--scope org` |
+| `-d, --output <dir>` | `AUDIT_OUTPUT` | `./reports` | Parent directory for the run's report folder |
+| `--include-frozen` | `AUDIT_INCLUDE_FROZEN` | off | Also scan frozen sites (skipped by default) |
+| `-h, --help` | — | — | Show usage |
+
+### Scope
+
+`--scope` maps to a Terminus `site:list` filter:
+
+| Scope | Terminus filter | Includes |
+|---|---|---|
+| `me` (default) | `--owner=me` | Only sites you personally own |
+| `team` | `--team` | Sites you're a team member of |
+| `org` | `--org=<id>` | Sites in your organization(s) — set `--org` to target one |
+| `all` | *(none)* | Every site accessible to you |
+
+> Note: `me` **excludes** sites owned by an organization or a teammate. If your
+> sites live under a Pantheon org, use `--scope org` (or `all`).
+
+### Output
+
+`reports/wp-core-audit-<timestamp>/` containing:
+
+- `matches.csv` — affected sites (`site,environment,wp_core_version,matched_range`)
+- `matches.json` — the same, machine-readable
+- `scan-full.csv` — every site considered, with a per-site `status`
+- `summary.txt` — run parameters and totals
+
+If any affected sites are found, a red **ALERT** banner is printed listing them.
+
+### Version-comparison notes
+
+- WordPress reports an `x.y.0` release as just `x.y` (e.g. `6.9`) — treated as
+  equal to `6.9.0` and matched accordingly.
+- Comparison is numeric and zero-padded, so `10.0` > `7.0.1` (not lexical).
+
+---
+
+## 2. Remediation — `apply-upstream-updates.sh`
+
+Reads the audit's `matches.csv`, classifies each affected site by its Terminus
+**upstream type**, and applies upstream updates only where they'll actually
+work.
+
+**Only `type == core` upstreams** (the Pantheon-maintained WordPress upstreams
+that bundle and track WP core — "WordPress", "WordPress Composer Managed") are
+auto-applied via `terminus upstream:updates:apply`. Everything else is
+**excluded and reported**, because `upstream:updates:apply` can't move their core
+version:
+
+| Excluded type | Why | Where to update |
+|---|---|---|
+| `custom` | An org's custom upstream | Update the custom upstream's repo, then re-run |
+| `icr` | Built with the GitHub/GitLab App — code on external VCS | Update WordPress in the site's own git repo |
+| `product` | "Empty"/product upstream; WP is composer-managed | Update via the site's composer/repo |
+| *other* | Anything else | Reported for manual review |
+
+The updatable-type allowlist is configurable with `--updatable-types`.
+
+### Safety
+
+**Dry-run by default** — it classifies and reports, making **no changes**. You
+must pass `--execute` to actually apply, and in execute mode it refuses to run
+non-interactively without `-y`.
+
+```bash
+./apply-upstream-updates.sh                        # dry-run against newest audit report
+./apply-upstream-updates.sh -i reports/wp-core-audit-20260721-124620
+./apply-upstream-updates.sh --execute              # apply (prompts for confirmation)
+./apply-upstream-updates.sh --execute -y --updatedb --accept-upstream
+```
+
+### Options
+
+| Flag | Env var | Default | Meaning |
+|---|---|---|---|
+| `-i, --input <path>` | `APPLY_INPUT` | newest audit report | `matches.csv` or a report directory |
+| `-d, --output <dir>` | `APPLY_OUTPUT` | `./reports` | Parent dir for this run's report |
+| `--updatable-types <t>` | `APPLY_UPDATABLE_TYPES` | `core` | Upstream types to auto-apply |
+| `--execute` | `APPLY_EXECUTE` | off (dry-run) | Actually apply updates |
+| `--updatedb` | — | off | Pass `--updatedb` (Drupal only; harmless for WP) |
+| `--accept-upstream` | — | off | Auto-resolve conflicts in favor of upstream |
+| `--no-verify` | — | verify on | Skip the post-apply WP-version re-check |
+| `-y, --yes` | `APPLY_YES` | off | Skip the confirmation prompt |
+| `-h, --help` | — | — | Show usage |
+
+### Output
+
+`reports/upstream-apply-<timestamp>/` containing:
+
+- `classification.csv` — every affected site, its upstream, site org, and the decision (`apply`/`exclude`)
+- `excluded-upstreams.csv` — upstreams needing manual update, grouped, with repo URL and the affected sites (each with version + org)
+- `applied.csv` — per-site apply results (execute mode): `old → new` version, status, notes
+- `summary.txt` — counts + the list of upstreams needing attention
+
+In execute mode with verification on, an applied `core` site whose version
+**didn't change** is flagged `no-change` — a signal the upstream itself may be
+behind or not tracking core.
+
+### Exit codes (both scripts)
+
+| Code | Meaning |
+|---|---|
+| `0` | Clean — nothing flagged |
+| `1` | Usage / precondition error |
+| `2` | Findings: audit → affected sites found; apply → sites excluded or an apply failed |
+
+Handy for CI/cron: a non-zero exit means "something needs attention."
+
+---
+
+## Typical workflow
+
+```bash
+# 1. Find affected sites (org scope, since sites live under an org)
+./audit-wp-core-versions.sh -s org --org "My Org"
+
+# 2. See what can be auto-remediated vs. what needs manual work (no changes yet)
+./apply-upstream-updates.sh
+
+# 3. Apply to the core-upstream sites
+./apply-upstream-updates.sh --execute
+
+# 4. Manually update the custom / external-VCS upstreams the report listed,
+#    then re-audit to confirm.
+./audit-wp-core-versions.sh -s org --org "My Org"
+```
