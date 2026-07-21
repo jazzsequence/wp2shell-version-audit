@@ -86,23 +86,23 @@ If any affected sites are found, a red **ALERT** banner is printed listing them.
 ## 2. Remediation — `apply-upstream-updates.sh`
 
 Reads the audit's `matches.csv`, classifies each affected site by its Terminus
-**upstream type**, and applies upstream updates only where they'll actually
-work.
+upstream, and applies upstream updates only to **Pantheon-maintained** upstreams
+(where `terminus upstream:updates:apply` actually moves WP core).
 
-**Only `type == core` upstreams** (the Pantheon-maintained WordPress upstreams
-that bundle and track WP core — "WordPress", "WordPress Composer Managed") are
-auto-applied via `terminus upstream:updates:apply`. Everything else is
-**excluded and reported**, because `upstream:updates:apply` can't move their core
-version:
+A site is **auto-applied** when its upstream is:
+- `type=core` (e.g. "WordPress", "WordPress (Composer Managed)"), or
+- `type=custom` **with a Pantheon-owned repo** (`pantheon-systems`/`pantheon-upstreams`) — multisite upstreams are always `type=custom` but Pantheon-maintained.
 
-| Excluded type | Why | Where to update |
+Everything else is **excluded and reported** with specific guidance:
+
+| Excluded | Why | Where to update |
 |---|---|---|
-| `custom` | An org's custom upstream | Update the custom upstream's repo, then re-run |
-| `icr` | Built with the GitHub/GitLab App — code on external VCS | Update WordPress in the site's own git repo |
-| `product` | "Empty"/product upstream; WP is composer-managed | Update via the site's composer/repo |
-| *other* | Anything else | Reported for manual review |
+| `custom` (org-owned repo) | Your organization's own custom upstream | Update the custom upstream's own repo, then re-run |
+| `icr` | Externally version-controlled — WordPress lives in the connected external repo | Update WordPress in the external version-control repository |
+| `product` | Empty/BYO upstream — nothing ships in it | Update WordPress in the site's own codebase |
 
-The updatable-type allowlist is configurable with `--updatable-types`.
+Classification uses `type` **plus repo ownership**, so it generalizes across the
+whole upstream catalog (no hardcoded upstream list).
 
 ### Safety
 
@@ -124,7 +124,6 @@ with **no changes**.
 |---|---|---|---|
 | `-i, --input <path>` | `APPLY_INPUT` | newest audit report | `matches.csv` or a report directory |
 | `-d, --output <dir>` | `APPLY_OUTPUT` | `./reports` | Parent dir for this run's report |
-| `--updatable-types <t>` | `APPLY_UPDATABLE_TYPES` | `core` | Upstream types to auto-apply |
 | `-n, --dry-run` | `APPLY_DRY_RUN` | off (applies) | Classify + report only; make no changes |
 | `--updatedb` | — | off | Pass `--updatedb` (Drupal only; harmless for WP) |
 | `--accept-upstream` | — | off | Auto-resolve conflicts in favor of upstream |
