@@ -23,12 +23,13 @@
 #                           Default: 6.9.0-6.9.4,7.0.0-7.0.1
 #   -e, --env <env>         Environment to read the version from (default: dev).
 #   -s, --scope <scope>     Which sites to scan (default: me):
-#                             me    sites you own                (--owner=me)
+#                             me    sites you own                 (--owner=me)
 #                             team  sites you're a team member of (--team)
-#                             org   sites in your organization(s) (--org=<id>)
+#                             org   sites in your organization(s) (--org)
 #                             all   every site accessible to you  (no filter)
-#       --org <id>          Organization name/label/UUID (or "all") to use with
-#                           "--scope org". Default: all.
+#       --org <id>          Organization name/label/UUID to scan. Implies
+#                           "--scope org" on its own — no need to also pass -s.
+#                           ("-s org" without --org scans all your orgs.)
 #   -d, --output <dir>      Parent directory for the report (default: ./reports).
 #       --include-frozen    Also scan frozen sites (skipped by default).
 #   -h, --help              Show this help and exit.
@@ -101,7 +102,7 @@ while [ $# -gt 0 ]; do
     -r|--ranges)       RANGES="${2:?--ranges needs a value}"; shift 2 ;;
     -e|--env)          ENVIRONMENT="${2:?--env needs a value}"; shift 2 ;;
     -s|--scope)        SCOPE="${2:?--scope needs a value}"; shift 2 ;;
-    --org)             ORG="${2:?--org needs a value}"; shift 2 ;;
+    --org)             ORG="${2:?--org needs a value}"; SCOPE=org; shift 2 ;;  # implies --scope org
     -d|--output)       OUTPUT_PARENT="${2:?--output needs a value}"; shift 2 ;;
     --include-frozen)  INCLUDE_FROZEN=1; shift ;;
     -h|--help)         usage 0 ;;
