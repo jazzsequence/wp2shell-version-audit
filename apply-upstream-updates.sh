@@ -6,19 +6,17 @@
 # classifies each affected site by its Terminus upstream, and applies upstream
 # updates ONLY to sites whose upstream can actually receive them.
 #
-# Only upstreams of type "core" (the Pantheon-maintained WordPress upstreams
-# that bundle and track WP core -- e.g. "WordPress", "WordPress Composer
-# Managed") are auto-updated via `terminus upstream:updates:apply`. Every other
-# upstream is EXCLUDED and reported so you know where to update WordPress by
-# hand:
-#   - custom  : an org's custom upstream -- update the custom upstream's repo,
-#               then re-run this script.
-#   - icr     : sites built with the GitHub/GitLab App (external VCS) -- update
-#               WordPress in the site's own git repository.
-#   - product : "empty"/product upstreams where WP is composer-managed -- update
-#               via the site's composer/repo.
-#   - other   : anything else -- reported for manual review.
-# The set of auto-updatable types is configurable (--updatable-types).
+# A site is auto-updated via `terminus upstream:updates:apply` when its upstream
+# is Pantheon-maintained:
+#   - type=core                          -> apply
+#   - type=custom AND Pantheon-owned repo -> apply (multisite/managed upstreams
+#     are always type=custom but live under pantheon-systems/pantheon-upstreams)
+# Everything else is EXCLUDED and reported with specific guidance:
+#   - custom (org-owned repo) : update the custom upstream's own repo, re-run.
+#   - icr                     : externally version-controlled -- update WordPress
+#                               in the site's external VCS repository.
+#   - product                 : empty/BYO upstream -- update WordPress in the
+#                               site's own codebase.
 #
 # APPLIES BY DEFAULT. Use --dry-run (-n) to classify + report with NO changes.
 # Before applying, it prompts once for confirmation on an interactive terminal
@@ -34,8 +32,6 @@
 #   -i, --input <path>          matches.csv, OR a report directory containing
 #                               it. Default: newest ./reports/wp-core-audit-*/.
 #   -d, --output <dir>          Parent dir for this run's report (default: ./reports).
-#       --updatable-types <t>   Comma/space list of upstream types to auto-apply
-#                               (default: core).
 #   -n, --dry-run               Classify + report only; make NO changes.
 #       --updatedb              Pass --updatedb to upstream:updates:apply.
 #       --accept-upstream       Pass --accept-upstream (auto-resolve conflicts).
@@ -44,8 +40,8 @@
 #   -j, --jobs <n>              Max parallel operations (default: 5).
 #   -h, --help                  Show this help and exit.
 #
-# Env var equivalents (flags win): APPLY_INPUT, APPLY_OUTPUT,
-# APPLY_UPDATABLE_TYPES, APPLY_DRY_RUN, APPLY_YES, APPLY_JOBS.
+# Env var equivalents (flags win): APPLY_INPUT, APPLY_OUTPUT, APPLY_DRY_RUN,
+# APPLY_YES, APPLY_JOBS.
 #
 # Exit codes:
 #   0  clean: nothing needs manual attention
@@ -60,7 +56,6 @@ set -euo pipefail
 # ----------------------------------------------------------------------------
 INPUT="${APPLY_INPUT:-}"
 OUTPUT_PARENT="${APPLY_OUTPUT:-./reports}"
-UPDATABLE_TYPES="${APPLY_UPDATABLE_TYPES:-core}"
 # Applies by default; dry-run is opt-in (flag or APPLY_DRY_RUN=1).
 if [ "${APPLY_DRY_RUN:-0}" = "1" ]; then EXECUTE=0; else EXECUTE=1; fi
 ASSUME_YES="${APPLY_YES:-0}"
@@ -102,7 +97,6 @@ while [ $# -gt 0 ]; do
   case "$1" in
     -i|--input)           INPUT="${2:?--input needs a value}"; shift 2 ;;
     -d|--output)          OUTPUT_PARENT="${2:?--output needs a value}"; shift 2 ;;
-    --updatable-types)    UPDATABLE_TYPES="${2:?--updatable-types needs a value}"; shift 2 ;;
     -n|--dry-run)         EXECUTE=0; shift ;;
     --updatedb)           DO_UPDATEDB=1; shift ;;
     --accept-upstream)    DO_ACCEPT=1; shift ;;
@@ -117,13 +111,27 @@ done
 case "$JOBS" in ''|*[!0-9]*) err "--jobs must be a positive integer"; exit 1 ;; esac
 [ "$JOBS" -lt 1 ] && JOBS=1
 
-# Normalise the updatable-types list to space-separated for matching.
-UPDATABLE_TYPES="$(printf '%s' "$UPDATABLE_TYPES" | tr ',' ' ')"
+# True if a repo URL is a Pantheon-owned upstream repo.
+is_pantheon_repo() {
+  case "$1" in
+    *github.com/pantheon-systems/*|*github.com/pantheon-upstreams/*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
 
-is_updatable_type() {
-  local t
-  for t in $UPDATABLE_TYPES; do [ "$1" = "$t" ] && return 0; done
-  return 1
+# Decide apply|exclude from upstream type + repo. Multisite upstreams are
+# always type=custom but Pantheon-owned (per-site multisite upstreams), so a
+# custom upstream whose repo is Pantheon-owned is still auto-updatable.
+#   core                      -> apply
+#   custom + Pantheon repo    -> apply (multisite / managed)
+#   custom + non-Pantheon repo-> exclude (org's own custom upstream)
+#   icr / product / other     -> exclude
+decide_apply() {  # $1=type $2=repo ; echoes apply|exclude
+  case "$1" in
+    core)   printf 'apply' ;;
+    custom) if is_pantheon_repo "$2"; then printf 'apply'; else printf 'exclude'; fi ;;
+    *)      printf 'exclude' ;;
+  esac
 }
 
 # ----------------------------------------------------------------------------
@@ -170,7 +178,6 @@ printf 'site,environment,upstream_label,old_version,new_version,apply_status,not
 MODE="DRY-RUN (no changes)"; [ "$EXECUTE" = "1" ] && MODE="EXECUTE"
 info "Input:            $INPUT"
 info "Affected sites:   $N"
-info "Updatable types:  ${UPDATABLE_TYPES}"
 info "Mode:             ${MODE}"
 info "Output directory: $OUTDIR"
 info ""
@@ -221,7 +228,7 @@ classify_worker() {
   else
     IFS=$'\t' read -r u_type u_label u_repo <<<"$(lookup_upstream "$uuid")" || true
   fi
-  if is_updatable_type "$u_type"; then decision="apply"; else decision="exclude"; fi
+  decision="$(decide_apply "$u_type" "$u_repo")"
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$site" "$env" "$ver" "$u_type" "$u_label" "$uuid" "$u_repo" "$site_org" "$decision" > "${CL_WORK}/${idx}"
   printf '  [%-7s] %-30s %s [%s]\n' "$decision" "$site" "$u_label" "$u_type" >&2
@@ -358,15 +365,14 @@ rule() { printf '  %s\n' '------------------------------------------------------
   printf '  WordPress upstream remediation  —  %s\n' "$MODE"
   printf '====================================================================\n'
   printf '  Run:             %s\n' "$STAMP"
-  printf '  Source audit:    %s\n' "$INPUT"
-  printf '  Updatable types: %s\n\n' "$UPDATABLE_TYPES"
+  printf '  Source audit:    %s\n\n' "$INPUT"
   printf '  Affected sites ............... %s\n' "$N"
-  printf '  Auto-updatable (core) ........ %s\n' "$APPLY_N"
+  printf '  Auto-updatable ............... %s\n' "$APPLY_N"
   printf '  Excluded (need attention) .... %s\n' "$EXCLUDED_COUNT"
 
   printf '\n'; rule
   if [ "$EXECUTE" = "1" ]; then
-    printf '  APPLIED  (core upstreams)\n'; rule
+    printf '  APPLIED  (auto-updatable upstreams)\n'; rule
     if [ "$APPLY_N" -gt 0 ]; then
       printf '    %-30s %-18s %s\n' "SITE" "VERSION" "RESULT"
       tail -n +2 "$APPLIED_CSV" | while IFS=, read -r s e lbl old new st note; do
@@ -376,7 +382,7 @@ rule() { printf '  %s\n' '------------------------------------------------------
       printf '    (none)\n'
     fi
   else
-    printf '  AUTO-UPDATABLE  (core upstreams — run with --execute to apply)\n'; rule
+    printf '  AUTO-UPDATABLE  (Pantheon-maintained — run without --dry-run to apply)\n'; rule
     if [ "$APPLY_N" -gt 0 ]; then
       printf '    %-30s %-9s %s\n' "SITE" "VERSION" "UPSTREAM"
       k=0
@@ -397,13 +403,13 @@ rule() { printf '  %s\n' '------------------------------------------------------
     # -F'\t' preserves empty fields, which a bash `read` on tab data would
     # silently collapse. Each affected site is listed with its (never-empty) org.
     sort -t$'\t' -k1,1 "$EXCLUDED_TSV" | awk -F'\t' '
-      function why(t){ if(t=="custom")  return "Custom upstream (organization-owned)."
-                       if(t=="icr")     return "GitHub/GitLab App site — WordPress lives in external version control."
-                       if(t=="product") return "Product/empty upstream — WordPress is composer-managed."
-                       return "Upstream type is not auto-updatable via Terminus." }
-      function fix(t){ if(t=="custom")  return "Update the custom upstream repo, then re-run this script."
-                       if(t=="icr")     return "Update WordPress in the connected GitHub/GitLab repository."
-                       if(t=="product") return "Update WordPress via composer.json in the site repository."
+      function why(t){ if(t=="custom")  return "Custom upstream owned by your organization."
+                       if(t=="icr")     return "Externally version-controlled site — WordPress lives in the connected external repository."
+                       if(t=="product") return "Empty/BYO upstream — nothing ships in the upstream; WordPress lives in the site codebase."
+                       return "Upstream is not auto-updatable via Terminus." }
+      function fix(t){ if(t=="custom")  return "Update the custom upstream repo itself, then re-run this script."
+                       if(t=="icr")     return "Update WordPress in the external version-control repository."
+                       if(t=="product") return "Update WordPress in the site codebase directly."
                        return "Review and update manually." }
       function flush(){
         printf "\n    * %s  [type: %s]\n", label, type
