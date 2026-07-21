@@ -20,9 +20,10 @@
 #   - other   : anything else -- reported for manual review.
 # The set of auto-updatable types is configurable (--updatable-types).
 #
-# SAFETY: dry-run by default (classify + report, NO changes). Pass --execute to
-# actually apply. In --execute mode it refuses to run non-interactively unless
-# -y is given.
+# APPLIES BY DEFAULT. Use --dry-run (-n) to classify + report with NO changes.
+# Before applying, it prompts once for confirmation on an interactive terminal
+# (skip with -y). With no terminal (cron/CI) it proceeds without prompting, so
+# pass --dry-run in automation when you only want a report.
 #
 # Requirements: bash (3.2+), terminus (>= 3.x), an authenticated session.
 #
@@ -35,7 +36,7 @@
 #   -d, --output <dir>          Parent dir for this run's report (default: ./reports).
 #       --updatable-types <t>   Comma/space list of upstream types to auto-apply
 #                               (default: core).
-#       --execute               Actually apply updates (default: dry-run).
+#   -n, --dry-run               Classify + report only; make NO changes.
 #       --updatedb              Pass --updatedb to upstream:updates:apply.
 #       --accept-upstream       Pass --accept-upstream (auto-resolve conflicts).
 #       --no-verify             Skip the post-apply WP-version re-check.
@@ -43,7 +44,7 @@
 #   -h, --help                  Show this help and exit.
 #
 # Env var equivalents (flags win): APPLY_INPUT, APPLY_OUTPUT,
-# APPLY_UPDATABLE_TYPES, APPLY_EXECUTE, APPLY_YES.
+# APPLY_UPDATABLE_TYPES, APPLY_DRY_RUN, APPLY_YES.
 #
 # Exit codes:
 #   0  clean: nothing needs manual attention
@@ -59,7 +60,8 @@ set -euo pipefail
 INPUT="${APPLY_INPUT:-}"
 OUTPUT_PARENT="${APPLY_OUTPUT:-./reports}"
 UPDATABLE_TYPES="${APPLY_UPDATABLE_TYPES:-core}"
-EXECUTE="${APPLY_EXECUTE:-0}"
+# Applies by default; dry-run is opt-in (flag or APPLY_DRY_RUN=1).
+if [ "${APPLY_DRY_RUN:-0}" = "1" ]; then EXECUTE=0; else EXECUTE=1; fi
 ASSUME_YES="${APPLY_YES:-0}"
 DO_UPDATEDB=0
 DO_ACCEPT=0
@@ -80,7 +82,7 @@ while [ $# -gt 0 ]; do
     -i|--input)           INPUT="${2:?--input needs a value}"; shift 2 ;;
     -d|--output)          OUTPUT_PARENT="${2:?--output needs a value}"; shift 2 ;;
     --updatable-types)    UPDATABLE_TYPES="${2:?--updatable-types needs a value}"; shift 2 ;;
-    --execute)            EXECUTE=1; shift ;;
+    -n|--dry-run)         EXECUTE=0; shift ;;
     --updatedb)           DO_UPDATEDB=1; shift ;;
     --accept-upstream)    DO_ACCEPT=1; shift ;;
     --no-verify)          DO_VERIFY=0; shift ;;
@@ -246,10 +248,9 @@ if [ "$EXECUTE" = "1" ] && [ "$APPLY_N" -gt 0 ]; then
     if [ -t 0 ]; then
       printf 'About to apply upstream updates to %d site(s). Continue? [y/N] ' "$APPLY_N" >&2
       read -r ans
-      case "$ans" in y|Y|yes|YES) : ;; *) info "Aborted."; exit 1 ;; esac
+      case "$ans" in y|Y|yes|YES) : ;; *) info "Aborted. (Use --dry-run to preview without changes.)"; exit 1 ;; esac
     else
-      err "Refusing to apply in non-interactive mode without -y/--yes."
-      exit 1
+      info "Non-interactive: applying to ${APPLY_N} site(s). (Pass --dry-run to preview instead.)"
     fi
   fi
 
