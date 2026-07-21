@@ -32,10 +32,11 @@
 #                           ("-s org" without --org scans all your orgs.)
 #   -d, --output <dir>      Parent directory for the report (default: ./reports).
 #       --include-frozen    Also scan frozen sites (skipped by default).
+#   -j, --jobs <n>          Max parallel version checks (default: 5).
 #   -h, --help              Show this help and exit.
 #
 # Env var equivalents (flags win): AUDIT_RANGES, AUDIT_ENV, AUDIT_SCOPE,
-# AUDIT_ORG, AUDIT_OUTPUT, AUDIT_INCLUDE_FROZEN.
+# AUDIT_ORG, AUDIT_OUTPUT, AUDIT_INCLUDE_FROZEN, AUDIT_JOBS.
 #
 # Exit codes:
 #   0  clean run, no affected sites found
@@ -53,12 +54,16 @@ SCOPE="${AUDIT_SCOPE:-me}"
 ORG="${AUDIT_ORG:-all}"
 OUTPUT_PARENT="${AUDIT_OUTPUT:-./reports}"
 INCLUDE_FROZEN="${AUDIT_INCLUDE_FROZEN:-0}"
+JOBS="${AUDIT_JOBS:-5}"
 
 # ----------------------------------------------------------------------------
 # Helpers
 # ----------------------------------------------------------------------------
 err()  { printf 'ERROR: %s\n' "$*" >&2; }
 info() { printf '%s\n' "$*" >&2; }
+
+# Block until fewer than $JOBS background jobs are running (bounded pool).
+throttle() { while [ "$(jobs -rp | wc -l | tr -d ' ')" -ge "$JOBS" ]; do sleep 0.15; done; }
 
 usage() {
   # Print the leading comment block (from line 2 until the first non-comment
@@ -105,10 +110,14 @@ while [ $# -gt 0 ]; do
     --org)             ORG="${2:?--org needs a value}"; SCOPE=org; shift 2 ;;  # implies --scope org
     -d|--output)       OUTPUT_PARENT="${2:?--output needs a value}"; shift 2 ;;
     --include-frozen)  INCLUDE_FROZEN=1; shift ;;
+    -j|--jobs)         JOBS="${2:?--jobs needs a value}"; shift 2 ;;
     -h|--help)         usage 0 ;;
     *) err "Unknown option: $1"; usage 1 ;;
   esac
 done
+
+case "$JOBS" in ''|*[!0-9]*) err "--jobs must be a positive integer"; exit 1 ;; esac
+[ "$JOBS" -lt 1 ] && JOBS=1
 
 # Map scope -> the terminus site:list filter flags. An empty array (scope=all)
 # is expanded safely below with the "${arr[@]+...}" idiom for bash 3.2.
@@ -233,24 +242,47 @@ info "Found ${TOTAL} owned site(s): ${TO_SCAN} to scan, ${SKIPPED_NONWP} non-Wor
 info ""
 
 # ----------------------------------------------------------------------------
-# Scan loop. Index-based (bash 3.2 safe) so no stdin redirection is in play,
-# and each remote call gets </dev/null so ssh can't read our terminal either.
+# Scan phase — PARALLEL. Each worker fetches one site's WP core version over
+# the network and writes it to its own result file (no shared writers). The
+# range logic and all CSV/JSON writes happen in the sequential aggregation pass
+# below, in deterministic index order.
 # ----------------------------------------------------------------------------
+SCAN_WORK="$(mktemp -d)"
+trap 'rm -rf "$SCAN_WORK"' EXIT
+
+scan_worker() {
+  local idx="$1" name="$2" raw ver
+  raw="$(terminus remote:wp "${name}.${ENVIRONMENT}" -- core version </dev/null 2>/dev/null | tr -d '\r' | tail -n1 || true)"
+  ver="$(sanitize_version "${raw:-}")"
+  printf '%s' "$ver" > "${SCAN_WORK}/${idx}"
+  if [ -n "$ver" ]; then
+    printf '  [ok] %s.%s -> %s\n' "$name" "$ENVIRONMENT" "$ver" >&2
+  else
+    printf '  [!!] %s.%s -> no version\n' "$name" "$ENVIRONMENT" >&2
+  fi
+}
+
+info "Scanning ${TO_SCAN} site(s), up to ${JOBS} in parallel ..."
+i=0
+while [ "$i" -lt "$TO_SCAN" ]; do
+  throttle
+  scan_worker "$i" "${SCAN_NAMES[$i]}" &
+  i=$((i + 1))
+done
+wait
+
+# Aggregate results sequentially (deterministic order, single writer).
 SCANNED=0; ERRORS=0; MATCHED=0; JSON_ROWS=""
 NRANGES=${#RANGE_LO[@]}
 i=0
 while [ "$i" -lt "$TO_SCAN" ]; do
   NAME="${SCAN_NAMES[$i]}"; FRAMEWORK="${SCAN_FW[$i]}"; FROZEN="${SCAN_FROZEN[$i]}"
+  VER="$(cat "${SCAN_WORK}/${i}" 2>/dev/null || true)"
   i=$((i + 1))
-
-  printf '[%d/%d] %s.%s ... ' "$i" "$TO_SCAN" "$NAME" "$ENVIRONMENT" >&2
-  RAW_VER="$(terminus remote:wp "${NAME}.${ENVIRONMENT}" -- core version </dev/null 2>/dev/null | tr -d '\r' | tail -n1 || true)"
-  VER="$(sanitize_version "${RAW_VER:-}")"
   SCANNED=$((SCANNED + 1))
 
   if [ -z "$VER" ]; then
     ERRORS=$((ERRORS + 1))
-    printf 'ERROR (no version returned)\n' >&2
     printf '%s,%s,%s,%s,,error-or-no-version\n' \
       "$NAME" "$ENVIRONMENT" "$FRAMEWORK" "$FROZEN" >> "$SCAN_CSV"
     continue
@@ -259,7 +291,6 @@ while [ "$i" -lt "$TO_SCAN" ]; do
   printf '%s,%s,%s,%s,%s,ok\n' \
     "$NAME" "$ENVIRONMENT" "$FRAMEWORK" "$FROZEN" "$VER" >> "$SCAN_CSV"
 
-  # Does this version fall in any affected range?
   hit=""
   j=0
   while [ "$j" -lt "$NRANGES" ]; do
@@ -271,14 +302,12 @@ while [ "$i" -lt "$TO_SCAN" ]; do
 
   if [ -n "$hit" ]; then
     MATCHED=$((MATCHED + 1))
-    printf '%s  ⚠ AFFECTED [%s]\n' "$VER" "$hit" >&2
     printf '%s,%s,%s,%s\n' "$NAME" "$ENVIRONMENT" "$VER" "$hit" >> "$MATCHES_CSV"
     JSON_ROWS="${JSON_ROWS}$(printf '{"site":"%s","environment":"%s","wp_core_version":"%s","matched_range":"%s"}' \
       "$NAME" "$ENVIRONMENT" "$VER" "$hit"),"
-  else
-    printf '%s\n' "$VER" >&2
   fi
 done
+rm -rf "$SCAN_WORK"; trap - EXIT
 
 # ----------------------------------------------------------------------------
 # Write JSON (built by hand to avoid a jq dependency)

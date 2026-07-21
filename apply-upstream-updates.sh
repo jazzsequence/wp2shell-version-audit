@@ -41,10 +41,11 @@
 #       --accept-upstream       Pass --accept-upstream (auto-resolve conflicts).
 #       --no-verify             Skip the post-apply WP-version re-check.
 #   -y, --yes                   Don't prompt for confirmation before applying.
+#   -j, --jobs <n>              Max parallel operations (default: 5).
 #   -h, --help                  Show this help and exit.
 #
 # Env var equivalents (flags win): APPLY_INPUT, APPLY_OUTPUT,
-# APPLY_UPDATABLE_TYPES, APPLY_DRY_RUN, APPLY_YES.
+# APPLY_UPDATABLE_TYPES, APPLY_DRY_RUN, APPLY_YES, APPLY_JOBS.
 #
 # Exit codes:
 #   0  clean: nothing needs manual attention
@@ -66,12 +67,32 @@ ASSUME_YES="${APPLY_YES:-0}"
 DO_UPDATEDB=0
 DO_ACCEPT=0
 DO_VERIFY=1
+JOBS="${APPLY_JOBS:-5}"
 
 err()  { printf 'ERROR: %s\n' "$*" >&2; }
 info() { printf '%s\n' "$*" >&2; }
 usage() {
   awk 'NR>=2 { if ($0 !~ /^#/) exit; sub(/^# ?/, ""); print }' "$0"
   exit "${1:-0}"
+}
+
+# Block until fewer than $JOBS background jobs are running (bounded pool).
+throttle() { while [ "$(jobs -rp | wc -l | tr -d ' ')" -ge "$JOBS" ]; do sleep 0.15; done; }
+
+# Split a tab-delimited line from FILE ($1) into globals F1..F9, preserving
+# empty fields (a bash `read` with tab IFS would collapse them).
+parse_tsv9() {
+  local line
+  IFS= read -r line < "$1" 2>/dev/null || line=""
+  F1="${line%%$'\t'*}"; line="${line#*$'\t'}"
+  F2="${line%%$'\t'*}"; line="${line#*$'\t'}"
+  F3="${line%%$'\t'*}"; line="${line#*$'\t'}"
+  F4="${line%%$'\t'*}"; line="${line#*$'\t'}"
+  F5="${line%%$'\t'*}"; line="${line#*$'\t'}"
+  F6="${line%%$'\t'*}"; line="${line#*$'\t'}"
+  F7="${line%%$'\t'*}"; line="${line#*$'\t'}"
+  F8="${line%%$'\t'*}"; line="${line#*$'\t'}"
+  F9="$line"
 }
 
 # ----------------------------------------------------------------------------
@@ -87,10 +108,14 @@ while [ $# -gt 0 ]; do
     --accept-upstream)    DO_ACCEPT=1; shift ;;
     --no-verify)          DO_VERIFY=0; shift ;;
     -y|--yes)             ASSUME_YES=1; shift ;;
+    -j|--jobs)            JOBS="${2:?--jobs needs a value}"; shift 2 ;;
     -h|--help)            usage 0 ;;
     *) err "Unknown option: $1"; usage 1 ;;
   esac
 done
+
+case "$JOBS" in ''|*[!0-9]*) err "--jobs must be a positive integer"; exit 1 ;; esac
+[ "$JOBS" -lt 1 ] && JOBS=1
 
 # Normalise the updatable-types list to space-separated for matching.
 UPDATABLE_TYPES="$(printf '%s' "$UPDATABLE_TYPES" | tr ',' ' ')"
@@ -138,8 +163,7 @@ APPLIED_CSV="${OUTDIR}/applied.csv"
 EXCLUDED_TSV="${OUTDIR}/.excluded.tsv"           # working file, grouped later
 EXCLUDED_CSV="${OUTDIR}/excluded-upstreams.csv"
 SUMMARY="${OUTDIR}/summary.txt"
-CACHE="${OUTDIR}/.upstream-cache.tsv"
-: > "$EXCLUDED_TSV"; : > "$CACHE"
+: > "$EXCLUDED_TSV"
 printf 'site,environment,wp_core_version,upstream_type,upstream_label,upstream_id,site_org,decision\n' > "$CLASS_CSV"
 printf 'site,environment,upstream_label,old_version,new_version,apply_status,note\n' > "$APPLIED_CSV"
 
@@ -152,21 +176,14 @@ info "Output directory: $OUTDIR"
 info ""
 
 # ----------------------------------------------------------------------------
-# Look up an upstream's details by UUID, cached. Echoes: type<TAB>label<TAB>repo<TAB>org
+# Look up an upstream's details by UUID. Stateless (no shared cache file) so it
+# is safe to call from parallel workers. Echoes: type<TAB>label<TAB>repo
 # ----------------------------------------------------------------------------
 lookup_upstream() {
-  local uuid="$1" line row t l r o
-  line="$(grep -m1 "^${uuid}"$'\t' "$CACHE" 2>/dev/null || true)"
-  if [ -z "$line" ]; then
-    row="$(terminus upstream:info "$uuid" \
-      --fields=type,label,repository_url,organization --format=tsv 2>/dev/null \
-      | grep -v '^Deprecated' | tail -n1 || true)"
-    IFS=$'\t' read -r t l r o <<<"$row"
-    line="${uuid}"$'\t'"${t:-unknown}"$'\t'"${l:-?}"$'\t'"${r:-}"$'\t'"${o:-}"
-    printf '%s\n' "$line" >> "$CACHE"
-  fi
-  # strip leading uuid + tab, return the rest
-  printf '%s' "${line#*$'\t'}"
+  local uuid="$1" row t l r
+  row="$(terminus upstream:info "$uuid" --fields=type,label,repository_url --format=tsv 2>/dev/null | grep -v '^Deprecated' | tail -n1 || true)"
+  IFS=$'\t' read -r t l r <<<"$row" || true
+  printf '%s\t%s\t%s' "${t:-unknown}" "${l:-?}" "${r:-}"
 }
 
 # ----------------------------------------------------------------------------
@@ -183,44 +200,63 @@ org_name() {
 }
 
 # ----------------------------------------------------------------------------
-# Phase 1: classify every affected site by upstream (no mutation).
+# Phase 1: classify every affected site by upstream — PARALLEL. Each worker
+# resolves one site's upstream + org (no mutation) and writes a 9-field result
+# line to its own file. Aggregation below is sequential/ordered (single writer).
+#   result columns: site,env,ver,type,label,uuid,repo,site_org,decision
 # ----------------------------------------------------------------------------
-APPLY_SITE=(); APPLY_ENV=(); APPLY_VER=(); APPLY_LABEL=()
-EXCLUDED_COUNT=0
-i=0
-while [ "$i" -lt "$N" ]; do
-  site="${AFF_SITE[$i]}"; env="${AFF_ENV[$i]}"; ver="${AFF_VER[$i]}"
-  i=$((i + 1))
-  printf '[%d/%d] %s ... ' "$i" "$N" "$site" >&2
+CL_WORK="$(mktemp -d)"
+trap 'rm -rf "$CL_WORK"' EXIT
 
-  # One call gets both the upstream (uuid: url) and the site's org UUID.
+classify_worker() {
+  local idx="$1" site="$2" env="$3" ver="$4"
+  local srow uf org_uuid uuid site_org u_type u_label u_repo decision
   srow="$(terminus site:info "$site" --fields=upstream,organization --format=tsv 2>/dev/null | grep -v '^Deprecated' | tail -n1 || true)"
   uf="${srow%%$'\t'*}"
   org_uuid="${srow#*$'\t'}"; [ "$org_uuid" = "$srow" ] && org_uuid=""
   uuid="${uf%%:*}"; uuid="$(printf '%s' "$uuid" | tr -d '[:space:]')"
   site_org="$(org_name "$org_uuid")"
-
   if [ -z "$uuid" ]; then
-    printf 'could not resolve upstream\n' >&2
-    printf '%s,%s,%s,unknown,?,,%s,exclude\n' "$site" "$env" "$ver" "$site_org" >> "$CLASS_CSV"
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "" "unknown" "(unknown)" "" "$site" "$ver" "$site_org" >> "$EXCLUDED_TSV"
-    EXCLUDED_COUNT=$((EXCLUDED_COUNT + 1))
-    continue
-  fi
-
-  IFS=$'\t' read -r u_type u_label u_repo u_org <<<"$(lookup_upstream "$uuid")"
-
-  if is_updatable_type "$u_type"; then
-    printf '%s [%s] -> will apply\n' "$u_label" "$u_type" >&2
-    printf '%s,%s,%s,%s,%s,%s,%s,apply\n' "$site" "$env" "$ver" "$u_type" "$u_label" "$uuid" "$site_org" >> "$CLASS_CSV"
-    APPLY_SITE+=("$site"); APPLY_ENV+=("$env"); APPLY_VER+=("$ver"); APPLY_LABEL+=("$u_label")
+    u_type="unknown"; u_label="(unknown)"; u_repo=""
   else
-    printf '%s [%s] -> EXCLUDED\n' "$u_label" "$u_type" >&2
-    printf '%s,%s,%s,%s,%s,%s,%s,exclude\n' "$site" "$env" "$ver" "$u_type" "$u_label" "$uuid" "$site_org" >> "$CLASS_CSV"
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$uuid" "$u_type" "$u_label" "$u_repo" "$site" "$ver" "$site_org" >> "$EXCLUDED_TSV"
+    IFS=$'\t' read -r u_type u_label u_repo <<<"$(lookup_upstream "$uuid")" || true
+  fi
+  if is_updatable_type "$u_type"; then decision="apply"; else decision="exclude"; fi
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$site" "$env" "$ver" "$u_type" "$u_label" "$uuid" "$u_repo" "$site_org" "$decision" > "${CL_WORK}/${idx}"
+  printf '  [%-7s] %-30s %s [%s]\n' "$decision" "$site" "$u_label" "$u_type" >&2
+}
+
+info "Classifying ${N} site(s), up to ${JOBS} in parallel ..."
+i=0
+while [ "$i" -lt "$N" ]; do
+  throttle
+  classify_worker "$i" "${AFF_SITE[$i]}" "${AFF_ENV[$i]}" "${AFF_VER[$i]}" &
+  i=$((i + 1))
+done
+wait
+
+# Aggregate classification (sequential, ordered, single writer).
+APPLY_SITE=(); APPLY_ENV=(); APPLY_VER=(); APPLY_LABEL=()
+EXCLUDED_COUNT=0
+i=0
+while [ "$i" -lt "$N" ]; do
+  parse_tsv9 "${CL_WORK}/${i}"
+  idx=$i; i=$((i + 1))
+  if [ -z "$F1" ]; then   # worker produced no result
+    F1="${AFF_SITE[$idx]}"; F2="${AFF_ENV[$idx]}"; F3="${AFF_VER[$idx]}"
+    F4="unknown"; F5="(worker-error)"; F6=""; F7=""; F8="unknown"; F9="exclude"
+  fi
+  # F1 site F2 env F3 ver F4 type F5 label F6 uuid F7 repo F8 site_org F9 decision
+  printf '%s,%s,%s,%s,%s,%s,%s,%s\n' "$F1" "$F2" "$F3" "$F4" "$F5" "$F6" "$F8" "$F9" >> "$CLASS_CSV"
+  if [ "$F9" = "apply" ]; then
+    APPLY_SITE+=("$F1"); APPLY_ENV+=("$F2"); APPLY_VER+=("$F3"); APPLY_LABEL+=("$F5")
+  else
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$F6" "$F4" "$F5" "$F7" "$F1" "$F3" "$F8" >> "$EXCLUDED_TSV"
     EXCLUDED_COUNT=$((EXCLUDED_COUNT + 1))
   fi
 done
+rm -rf "$CL_WORK"; trap - EXIT
 
 APPLY_N=${#APPLY_SITE[@]}
 
@@ -255,13 +291,12 @@ if [ "$EXECUTE" = "1" ] && [ "$APPLY_N" -gt 0 ]; then
   fi
 
   info ""
-  info "Applying upstream updates ..."
-  j=0
-  while [ "$j" -lt "$APPLY_N" ]; do
-    site="${APPLY_SITE[$j]}"; env="${APPLY_ENV[$j]}"; old="${APPLY_VER[$j]}"; label="${APPLY_LABEL[$j]}"
-    j=$((j + 1))
-    printf '[%d/%d] apply %s.%s ... ' "$j" "$APPLY_N" "$site" "$env" >&2
+  info "Applying to ${APPLY_N} site(s), up to ${JOBS} in parallel ..."
+  AP_WORK="$(mktemp -d)"
+  trap 'rm -rf "$AP_WORK"' EXIT
 
+  apply_worker() {
+    local idx="$1" site="$2" env="$3" old="$4" label="$5" rc new status note
     set +e
     terminus upstream:updates:apply "${site}.${env}" \
       $( [ "$DO_UPDATEDB" = 1 ] && printf -- '--updatedb' ) \
@@ -269,12 +304,10 @@ if [ "$EXECUTE" = "1" ] && [ "$APPLY_N" -gt 0 ]; then
       -y </dev/null >/dev/null 2>&1
     rc=$?
     set -e
-
     new="$old"; status="applied"; note=""
     if [ "$rc" -ne 0 ]; then
       status="apply-failed"; note="terminus exit $rc"
-      APPLIED_FAILED=$((APPLIED_FAILED + 1))
-      printf 'FAILED (exit %s)\n' "$rc" >&2
+      printf '  [FAIL]     %s.%s (exit %s)\n' "$site" "$env" "$rc" >&2
     else
       if [ "$DO_VERIFY" = "1" ]; then
         new="$(terminus remote:wp "${site}.${env}" -- core version </dev/null 2>/dev/null | tr -d '\r' | tail -n1 || true)"
@@ -282,15 +315,36 @@ if [ "$EXECUTE" = "1" ] && [ "$APPLY_N" -gt 0 ]; then
       fi
       if [ "$DO_VERIFY" = "1" ] && [ "$new" = "$old" ]; then
         status="no-change"; note="version still ${new}; upstream may not track core"
-        APPLIED_NOCHANGE=$((APPLIED_NOCHANGE + 1))
-        printf 'applied but version unchanged (%s)\n' "$new" >&2
+        printf '  [NOCHANGE] %s.%s (still %s)\n' "$site" "$env" "$new" >&2
       else
-        APPLIED_OK=$((APPLIED_OK + 1))
-        printf 'ok (%s -> %s)\n' "$old" "$new" >&2
+        printf '  [ok]       %s.%s (%s -> %s)\n' "$site" "$env" "$old" "$new" >&2
       fi
     fi
-    printf '%s,%s,%s,%s,%s,%s,%s\n' "$site" "$env" "$label" "$old" "$new" "$status" "$note" >> "$APPLIED_CSV"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$site" "$env" "$label" "$old" "$new" "$status" "$note" > "${AP_WORK}/${idx}"
+  }
+
+  j=0
+  while [ "$j" -lt "$APPLY_N" ]; do
+    throttle
+    apply_worker "$j" "${APPLY_SITE[$j]}" "${APPLY_ENV[$j]}" "${APPLY_VER[$j]}" "${APPLY_LABEL[$j]}" &
+    j=$((j + 1))
   done
+  wait
+
+  # Aggregate apply results (sequential, ordered, single writer).
+  j=0
+  while [ "$j" -lt "$APPLY_N" ]; do
+    r_note=""
+    IFS=$'\t' read -r r_site r_env r_label r_old r_new r_status r_note < "${AP_WORK}/${j}" || true
+    j=$((j + 1))
+    printf '%s,%s,%s,%s,%s,%s,%s\n' "$r_site" "$r_env" "$r_label" "$r_old" "$r_new" "$r_status" "$r_note" >> "$APPLIED_CSV"
+    case "$r_status" in
+      applied)      APPLIED_OK=$((APPLIED_OK + 1)) ;;
+      no-change)    APPLIED_NOCHANGE=$((APPLIED_NOCHANGE + 1)) ;;
+      *)            APPLIED_FAILED=$((APPLIED_FAILED + 1)) ;;
+    esac
+  done
+  rm -rf "$AP_WORK"; trap - EXIT
 fi
 
 # ----------------------------------------------------------------------------
@@ -372,6 +426,6 @@ rule() { printf '  %s\n' '------------------------------------------------------
   printf '\n  Location:         %s\n' "$OUTDIR"
 } | tee "$SUMMARY" >&2
 
-rm -f "$EXCLUDED_TSV" "$CACHE"
+rm -f "$EXCLUDED_TSV" "$ORG_MAP"
 
 { [ "$EXCLUDED_COUNT" -gt 0 ] || [ "$APPLIED_FAILED" -gt 0 ]; } && exit 2 || exit 0
