@@ -18,7 +18,7 @@ Pantheon sites and patching them (updating WordPress core) via upstream updates:
 > response.
 > To *detect* whether a site shows signs of the wp2shell compromise chain
 > (CVE-2026-60137 / CVE-2026-63030), use Miriam Goldman's read-only audit +
-> Claude skill: **[wp2shell-audit](https://github.com/miriamgoldman/wp2shell-audit)**.
+> Claude skill: **[wp2shell-audit](https://github.com/pantheon-systems-ps/wp2shell-audit)**.
 > Cleanup of a confirmed compromise is manual.
 
 Nothing personal is hardcoded. Site discovery uses Terminus scope filters, so
