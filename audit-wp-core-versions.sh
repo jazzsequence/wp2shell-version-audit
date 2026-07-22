@@ -20,7 +20,8 @@
 #
 # Options:
 #   -r, --ranges <spec>     Comma-separated inclusive ranges "low-high,low-high".
-#                           Default: 6.9.0-6.9.4,7.0.0-7.0.1
+#                           Default: 6.8.0-6.8.5,6.9.0-6.9.4,7.0.0-7.0.1
+#                           (CVE-2026-60137: WP 6.8 through 7.0.1)
 #   -e, --env <env>         Environment to read the version from (default: dev).
 #   -s, --scope <scope>     Which sites to scan (default: me):
 #                             me    sites you own                 (--owner=me)
@@ -48,7 +49,11 @@ set -euo pipefail
 # ----------------------------------------------------------------------------
 # Defaults (overridable by env vars, then by flags)
 # ----------------------------------------------------------------------------
-RANGES="${AUDIT_RANGES:-6.9.0-6.9.4,7.0.0-7.0.1}"
+# Default ranges track CVE-2026-60137 (SQL injection in WP_Query via
+# author_exclude / author__not_in), affecting WordPress 6.8 through 7.0.1.
+# WordPress backports the fix per branch (6.8.6 / 6.9.5 / 7.0.2), so the
+# affected set is the three sub-ranges below, not a flat 6.8.0-7.0.1.
+RANGES="${AUDIT_RANGES:-6.8.0-6.8.5,6.9.0-6.9.4,7.0.0-7.0.1}"
 ENVIRONMENT="${AUDIT_ENV:-dev}"
 SCOPE="${AUDIT_SCOPE:-me}"
 ORG="${AUDIT_ORG:-all}"

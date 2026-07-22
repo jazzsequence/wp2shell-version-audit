@@ -25,7 +25,9 @@ sites, unchanged. Share freely.
 
 ## 1. Auditing — `audit-wp-core-versions.sh`
 
-Default affected ranges: `6.9.0–6.9.4` and `7.0.0–7.0.1` (inclusive).
+Default affected ranges: `6.8.0–6.8.5`, `6.9.0–6.9.4`, and `7.0.0–7.0.1`
+(inclusive) — the versions affected by CVE-2026-60137 (WordPress 6.8 through
+7.0.1; fixed per branch in 6.8.6 / 6.9.5 / 7.0.2).
 
 ```bash
 ./audit-wp-core-versions.sh                        # default ranges, dev, sites you own
@@ -38,7 +40,7 @@ Default affected ranges: `6.9.0–6.9.4` and `7.0.0–7.0.1` (inclusive).
 
 | Flag | Env var | Default | Meaning |
 |---|---|---|---|
-| `-r, --ranges <spec>` | `AUDIT_RANGES` | `6.9.0-6.9.4,7.0.0-7.0.1` | Comma-separated **inclusive** ranges (`low-high`) |
+| `-r, --ranges <spec>` | `AUDIT_RANGES` | `6.8.0-6.8.5,6.9.0-6.9.4,7.0.0-7.0.1` | Comma-separated **inclusive** ranges (`low-high`) |
 | `-e, --env <env>` | `AUDIT_ENV` | `dev` | Environment to read the version from |
 | `-s, --scope <scope>` | `AUDIT_SCOPE` | `me` | `me` \| `team` \| `org` \| `all` (see below) |
 | `--org <id>` | `AUDIT_ORG` | `all` | Org name/label/UUID. **Implies `--scope org`** — no need to also pass `-s org` |
