@@ -85,32 +85,40 @@ If any affected sites are found, a red **ALERT** banner is printed listing them.
 
 ## 2. Remediation — `apply-upstream-updates.sh`
 
-Reads the audit's `matches.csv`, classifies each affected site by its Terminus
-upstream, and applies upstream updates only to **Pantheon-maintained** upstreams
-(where `terminus upstream:updates:apply` actually moves WP core).
+Reads the audit's `matches.csv` and **applies whatever upstream updates are
+available** to each affected site, then re-checks the WordPress version against
+that site's affected range to see whether it actually helped.
 
-A site is **auto-applied** when its upstream is:
-- `type=core` (e.g. "WordPress", "WordPress (Composer Managed)"), or
-- `type=custom` **with a Pantheon-owned repo** (`pantheon-systems`/`pantheon-upstreams`) — multisite upstreams are always `type=custom` but Pantheon-maintained.
+**Apply is attempted on every affected site except** upstreams that can't receive
+useful upstream updates:
 
-Everything else is **excluded and reported** with specific guidance:
-
-| Excluded | Why | Where to update |
+| Skipped upstream | Why | Where WordPress comes from |
 |---|---|---|
-| `custom` (org-owned repo) | Your organization's own custom upstream | Update the custom upstream's own repo, then re-run |
-| `icr` | Externally version-controlled — WordPress lives in the connected external repo | Update WordPress in the external version-control repository |
-| `product` | Empty/BYO upstream — nothing ships in it | Update WordPress in the site's own codebase |
+| `icr` | Externally version-controlled | The connected external repository |
+| `product` | Empty/BYO upstream — nothing ships in it | The site's own codebase |
 
-Classification uses `type` **plus repo ownership**, so it generalizes across the
-whole upstream catalog (no hardcoded upstream list).
+Every other upstream (`core`, `custom`, multisite, composer-managed, …) gets an
+apply attempt — a custom upstream can still have upstream updates; they just may
+not include a newer WordPress. After applying, each site is classified:
+
+- **resolved** — WordPress moved out of the affected range ✅
+- **still-affected** — updates applied (or none available) but WordPress is still
+  in range → the upstream doesn't carry the WP bump; reported with the upstream's
+  type/org and where to update WordPress (e.g. a `custom` org upstream → update
+  that upstream's repo).
+
+Everything needing manual attention — the skipped `icr`/`product` sites plus any
+still-affected/failed/skipped-uncommitted — lands in one **NEEDS MANUAL
+ATTENTION** list (and `needs-manual.csv`).
 
 **SFTP handling & logs:** `upstream:updates:apply` requires Git connection mode.
 If an environment is in SFTP mode, the script automatically flips it to Git for
-the apply and restores SFTP afterward (leaving the site as it found it). The full
-Terminus output for every site is captured to `<report>/logs/<site>.<env>.log`,
-and each failure/no-change surfaces the real Terminus error (e.g. merge conflicts,
-build failures) in the progress output, `applied.csv`, and `summary.txt` — not a
-bare "exit 1".
+the apply and restores SFTP afterward (leaving the site as it found it). A site
+with **uncommitted SFTP changes is skipped** (never destroy unsaved work) and
+reported. The full Terminus output for every site is captured to
+`<report>/logs/<site>.<env>.log`, and any failure surfaces the real Terminus
+error (e.g. merge conflicts, build failures) in the progress output,
+`applied.csv`, and `summary.txt` — not a bare "exit 1".
 
 ### Safety
 
@@ -147,14 +155,15 @@ time).
 
 `reports/upstream-apply-<timestamp>/` containing:
 
-- `classification.csv` — every affected site, its upstream, site org, and the decision (`apply`/`exclude`)
-- `excluded-upstreams.csv` — upstreams needing manual update, grouped, with repo URL and the affected sites (each with version + org)
-- `applied.csv` — per-site apply results (execute mode): `old → new` version, status, notes
-- `summary.txt` — counts + the list of upstreams needing attention
+- `classification.csv` — every affected site, its upstream, site org, and decision (`apply`/`skip`)
+- `needs-manual.csv` — every site still needing attention (site, version, upstream, type, org, reason)
+- `applied.csv` — per-site apply results (apply mode): `old → new` version, status, reason
+- `logs/<site>.<env>.log` — full Terminus output per site (apply mode)
+- `summary.txt` — the human-readable report (counts, resolved list, needs-manual list)
 
-In execute mode with verification on, an applied `core` site whose version
-**didn't change** is flagged `no-change` — a signal the upstream itself may be
-behind or not tracking core.
+Each apply-mode site ends up as **resolved**, **still-affected**, **failed**, or
+**skipped-uncommitted**; the last three (plus the skipped `icr`/`product` sites)
+make up the NEEDS MANUAL ATTENTION list.
 
 ### Exit codes (both scripts)
 
