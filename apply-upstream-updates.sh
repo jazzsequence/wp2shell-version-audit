@@ -6,6 +6,12 @@
 # applies available Terminus upstream updates to each affected site, then checks
 # whether the WordPress version actually moved out of the affected range.
 #
+# SCOPE: this PATCHES the WordPress version only. It does NOT detect or clean up
+# a compromise -- if a site was already exploited, updating core leaves rogue
+# admins, forged content, webshells, and any data exposure in place. For
+# compromise detection (IOCs of the wp2shell chain), see Miriam Goldman's
+# wp2shell-audit: https://github.com/miriamgoldman/wp2shell-audit
+#
 # Model: apply is ATTEMPTED on every affected site EXCEPT those whose upstream
 # can't receive useful upstream updates:
 #   - icr     : externally version-controlled (code lives outside Pantheon).
@@ -399,7 +405,7 @@ MANUAL_N=$(( $(wc -l < "$MANUAL_CSV") - 1 ))
 rule() { printf '  %s\n' '------------------------------------------------------------------'; }
 {
   printf '====================================================================\n'
-  printf '  WordPress upstream remediation  —  %s\n' "$MODE"
+  printf '  WordPress core patch via upstream updates  —  %s\n' "$MODE"
   printf '====================================================================\n'
   printf '  Run:            %s\n' "$STAMP"
   printf '  Source audit:   %s\n\n' "$INPUT"

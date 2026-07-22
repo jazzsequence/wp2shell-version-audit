@@ -1,15 +1,24 @@
-# WordPress Core Version Audit + Upstream Remediation (Pantheon / Terminus)
+# WordPress Core Version Audit + Patching (Pantheon / Terminus)
 
 [![Unofficial Support](https://img.shields.io/badge/Pantheon-Unofficial_Support-yellow?logo=pantheon&color=FFDC28)](https://docs.pantheon.io/oss-support-levels#unofficial-support)
 
 Two self-contained Bash scripts for auditing WordPress core versions across your
-Pantheon sites and remediating them via upstream updates:
+Pantheon sites and patching them (updating WordPress core) via upstream updates:
 
 1. **`audit-wp-core-versions.sh`** — scans your sites and reports the ones whose
    WordPress core version falls within one or more **affected version ranges**.
-2. **`apply-upstream-updates.sh`** — takes the audit results and applies upstream
-   updates, but only to sites whose upstream can actually receive them; it
-   reports the rest (custom / external-VCS upstreams) for manual updating.
+2. **`apply-upstream-updates.sh`** — takes the audit results and applies available
+   upstream updates to move WordPress core to the latest version, reporting any
+   site the update didn't fix (custom / external-VCS / empty upstreams).
+
+> ⚠️ **These tools patch the WordPress *version*. They do not remediate an
+> attack.** If a site was already compromised, updating core does **not** remove
+> rogue admin accounts, forged content, webshells, or reverse data exposure —
+> that is separate incident response. To *detect* whether a site shows signs of
+> the wp2shell compromise chain (CVE-2026-60137 / CVE-2026-63030), use Miriam
+> Goldman's read-only audit + Claude skill:
+> **[wp2shell-audit](https://github.com/miriamgoldman/wp2shell-audit)**. Actual
+> cleanup of a confirmed compromise is manual.
 
 Nothing personal is hardcoded. Site discovery uses Terminus scope filters, so
 anyone with an authenticated Terminus session can run these against their own
@@ -85,7 +94,7 @@ If any affected sites are found, a red **ALERT** banner is printed listing them.
 
 ---
 
-## 2. Remediation — `apply-upstream-updates.sh`
+## 2. Patching — `apply-upstream-updates.sh`
 
 Reads the audit's `matches.csv` and **applies whatever upstream updates are
 available** to each affected site, then re-checks the WordPress version against
@@ -185,13 +194,18 @@ Handy for CI/cron: a non-zero exit means "something needs attention."
 # 1. Find affected sites (org scope, since sites live under an org)
 ./audit-wp-core-versions.sh --org "My Org"
 
-# 2. Preview what would be auto-remediated vs. what needs manual work
+# 2. Preview what would be auto-patched vs. what needs manual work
 ./apply-upstream-updates.sh --dry-run
 
-# 3. Apply to the core-upstream sites (prompts for confirmation)
+# 3. Apply available upstream updates (prompts for confirmation)
 ./apply-upstream-updates.sh
 
-# 4. Manually update the custom / external-VCS upstreams the report listed,
-#    then re-audit to confirm.
+# 4. Manually update the sites the report flagged as still-affected
+#    (icr/external-VCS, empty/BYO, and org-owned custom upstreams), then re-audit.
 ./audit-wp-core-versions.sh --org "My Org"
 ```
+
+Patching only closes the *version* gap. For any site that was exposed before it
+was patched, run a compromise check separately —
+[wp2shell-audit](https://github.com/miriamgoldman/wp2shell-audit) (read-only IOC
+audit + Claude skill) — and handle any confirmed compromise as incident response.
