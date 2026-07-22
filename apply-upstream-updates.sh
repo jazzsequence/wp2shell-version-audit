@@ -7,10 +7,13 @@
 # whether the WordPress version actually moved out of the affected range.
 #
 # SCOPE: this PATCHES the WordPress version only. It does NOT detect or clean up
-# a compromise -- if a site was already exploited, updating core leaves rogue
-# admins, forged content, webshells, and any data exposure in place. For
-# compromise detection (IOCs of the wp2shell chain), see Miriam Goldman's
-# wp2shell-audit: https://github.com/miriamgoldman/wp2shell-audit
+# a compromise -- if a site was already exploited, updating core leaves the
+# database-level damage in place: rogue admin accounts, forged content/posts,
+# and any data already exposed (e.g. leaked user hashes or secrets). (On
+# Pantheon, immutable code + no PHP execution from uploads mean webshells are
+# not an exposure vector.) For compromise detection (IOCs of the wp2shell
+# chain), see Miriam Goldman's wp2shell-audit:
+# https://github.com/miriamgoldman/wp2shell-audit
 #
 # Model: apply is ATTEMPTED on every affected site EXCEPT those whose upstream
 # can't receive useful upstream updates:

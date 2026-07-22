@@ -13,12 +13,14 @@ Pantheon sites and patching them (updating WordPress core) via upstream updates:
 
 > ⚠️ **These tools patch the WordPress *version*. They do not remediate an
 > attack.** If a site was already compromised, updating core does **not** remove
-> rogue admin accounts, forged content, webshells, or reverse data exposure —
-> that is separate incident response. To *detect* whether a site shows signs of
-> the wp2shell compromise chain (CVE-2026-60137 / CVE-2026-63030), use Miriam
-> Goldman's read-only audit + Claude skill:
-> **[wp2shell-audit](https://github.com/miriamgoldman/wp2shell-audit)**. Actual
-> cleanup of a confirmed compromise is manual.
+> the database-level damage — rogue admin accounts, forged content/posts, or any
+> data already exposed (leaked user hashes, secrets) — that is separate incident
+> response. (On Pantheon, immutable code and no PHP execution from `uploads/`
+> mean webshells aren't an exposure vector, so the relevant damage is DB-level.)
+> To *detect* whether a site shows signs of the wp2shell compromise chain
+> (CVE-2026-60137 / CVE-2026-63030), use Miriam Goldman's read-only audit +
+> Claude skill: **[wp2shell-audit](https://github.com/miriamgoldman/wp2shell-audit)**.
+> Cleanup of a confirmed compromise is manual.
 
 Nothing personal is hardcoded. Site discovery uses Terminus scope filters, so
 anyone with an authenticated Terminus session can run these against their own
